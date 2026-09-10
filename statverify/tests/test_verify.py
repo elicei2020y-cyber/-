@@ -7,8 +7,9 @@ import pytest
 
 from statverify.extract import extract
 from statverify.guard import admit
+from statverify.relations import R2A, R4_CENTER, R4_WIDTH, R5
 from statverify.tstats import p_two_tailed
-from statverify.verify import verify_claim
+from statverify.verify import reported_intervals, verify_claim
 
 from synth import build_cases, make_claim, round_half_up, slot
 from statverify.model import Claim
@@ -58,31 +59,24 @@ def test_localization_is_ambiguous_without_r5_r4():
 
 def test_localization_with_r5_r4():
     """Задача 1, критерий приёмки: с графом R2a+R5+R4:center+R4:width
-    локализация называет виновника для t/est/se/ci_lo/ci_hi всегда,
-    для df — в 15/33, для p — в 31/33. Оба отклонения честные и
-    разобраны прогоном (run_step3.py, раздел C), не подогнаны:
+    локализация называет виновника для t/p/est/se/ci_lo/ci_hi — всегда,
+    для df — в 15/33 (45.5%; 15/23=65.2% среди детектируемых, см.
+    test_solve_is_sound_on_consistent_grid и run_step3.py §A2 про
+    оставшиеся 10/33 генуинно неразличимых).
 
-    df: R4:width сознательно не голосует по df (relations.R4_WIDTH —
-    df_from там асимптотически неустойчив и давал интервал, не
-    содержащий истинный df, то есть настоящие ложные вето — было
-    обнаружено внешней проверкой и исправлено). Голосует по df теперь
-    только R2a, и в 10 из 33 случаев порча df вообще не обнаруживается
-    ни одним отношением (двусторонний p и полуширина CI почти не
-    зависят от df в этой области — то же явление, что 'нормальный
-    предел' для df в CLAUDE.md); это не ошибка локализации, а честная
-    абстенция (CONSISTENT — и это правильный ответ). Из оставшихся 23
-    обнаруженных случаев верно локализовано 15 (65.2%).
-
-    p: обратная сторона того же исправления. Раньше "df"-гипотеза при
-    порче p иногда ошибочно отклонялась случайным несогласием буквально
-    сломанного решения R4:width по df; после того как R4:width перестал
-    голосовать по df, для df единственный голос — R2a, и в 2 из 33
-    случаев порчи p (df=10,est=.5,se=.1 и df=24,est=1.0,se=.25) R2a,
-    решая df по (t, ИСПОРЧЕННОМУ p), находит какое-то правдоподобное
-    df — и гипотеза "df" остаётся в живых рядом с настоящим виновником
-    "p", раз её больше некому опровергнуть независимо. Это реальный
-    компромисс, а не послабление порога: цена честного исправления
-    вето по df.
+    df — единственное честное исключение, не послабление теста: df
+    входит в R2a (через t, p) и в R4:width (через ci_lo, ci_hi, se)
+    только как ОБРАЩЁННОЕ решение df_from, инвертирующее функцию с
+    горизонтальной асимптотой (t_crit(df,.05) -> 1.9600 и симметрично
+    нормальный предел для p — обе никогда не достигаются ни при каком
+    конечном df). Оба решателя поэтому дают ШИРОКИЕ (но состоятельные —
+    см. инвариантный тест) интервалы при df >= 25, которые реже
+    пересекаются пусто друг с другом, — честная неопределённость самой
+    статистики, не брак кода. (Раньше здесь стоял компромисс, где 2 из
+    33 случаев порчи p давали AMBIGUOUS вместо точного 'p' — это было
+    побочным эффектом временного удаления решателя df у R4:width, самого
+    по себе несостоятельного из-за бага в Relation.solve; после починки
+    solve() решатель восстановлен, и компромисс исчез — p снова 33/33.)
 
     Разметка — из tests/synth7.py, того же генератора, что и у
     scripts/run_step3.py, поэтому числа здесь и там совпадают дословно.
@@ -98,7 +92,7 @@ def test_localization_with_r5_r4():
             if v.status == "INCONSISTENT" and v.var == var:
                 per_var[var][0] += 1
 
-    expected_min_rate = {"df": 0.40, "p": 0.90}
+    expected_min_rate = {"df": 0.40}
     for var in VARS:
         correct, total = per_var[var]
         rate = correct / total
@@ -118,6 +112,54 @@ def test_no_false_positive_seven_values():
     for df, est, se in build_grid():
         v = verify_claim(make_claim7(gold(df, est, se)))
         assert v.status == "CONSISTENT", f"df={df} est={est} se={se} -> {v.line()}"
+
+
+def test_solve_is_sound_on_consistent_grid():
+    """Инвариант состоятельности Relation.solve — не про локализацию,
+    должен держаться всегда.
+
+    Для согласованной (не испорченной) семёрки, для КАЖДОГО отношения и
+    КАЖДОЙ его решаемой переменной, solve() обязан вернуть интервал,
+    содержащий истинное значение этой переменной. Иначе распространение
+    интервалов несостоятельно: узкий интервал, не содержащий истину,
+    способен дать INCONSISTENT на согласованном утверждении — то самое
+    ложное срабатывание, ради предотвращения которого построена вся
+    интервальная арифметика (правило 5).
+
+    Обнаружено внешней проверкой: solve() раньше молча отбрасывал углы
+    бокса, где решатель вернул None, и брал min/max только по успешным
+    углам. Для решателей, инвертирующих df_from (R2a: 'df' через t,p) —
+    функцию с горизонтальной асимптотой (t_crit(df,alpha) -> const при
+    df -> inf, никогда её не достигая) — истинная комбинация входов
+    после округления может лежать так, что часть углов проваливается ЗА
+    порог (None) и отбрасывается, а уцелевшие углы систематически смещены
+    в сторону, не содержащую истинное df. На реальной сетке синуса это
+    было не гипотетикой: 7 из 33 случаев R2a->df нарушали инвариант
+    ДО починки (см. историю коммита). Починка (relations.Relation.solve):
+    если решатель определён не на всех углах бокса, интервал расширяется
+    до полной области определения цели, а не до диапазона одних лишь
+    успешных углов — единственный способ остаться консервативным, не
+    зная заранее, с какой стороны решатель не определён.
+    """
+    from synth7 import build_grid, gold, make_claim as make_claim7
+
+    checked = 0
+    for df, est, se in build_grid():
+        true = gold(df, est, se)
+        claim = make_claim7(true)
+        rep = reported_intervals(claim)
+        for rel in (R2A, R5, R4_CENTER, R4_WIDTH):
+            for target in rel.solvers:
+                others = {k: v for k, v in rep.items()
+                          if k != target and k in rel.vars}
+                d = rel.solve(target, others)
+                true_val = true[target] if target != "alpha" else claim.ci_alpha
+                checked += 1
+                assert d is not None and d.contains(true_val), (
+                    f"{rel.key}.solve({target}) = {d} не содержит истинное "
+                    f"{true_val} при df={df} est={est} se={se} — "
+                    f"несостоятельное распространение интервалов")
+    assert checked > 300, f"подозрительно мало проверок: {checked}"
 
 
 def test_df_exonerated_by_normal_limit():
