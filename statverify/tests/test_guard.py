@@ -14,6 +14,7 @@ import pytest
 
 from statverify.extract import extract
 from statverify.guard import check_claim, check_slot
+from statverify.model import Slot
 
 from corpus import CORPUS
 from corrupt import CORRUPTIONS, EXPECTED_CATCHER
@@ -51,6 +52,50 @@ def test_corruption_is_caught(name):
                 f"{name} на {case['id']} поймана критерием {res.reason}, "
                 f"ожидался {EXPECTED_CATCHER[name]}")
     assert fired > 0, f"порча {name} ни разу не применилась — покрытие мнимое"
+
+
+def test_new_slots_pass_on_honest_extraction():
+    """est/se/ci_lo/ci_hi из задачи 1 обязаны проходить охранника целиком,
+    как и старые слоты — тот же C0-C4, применённый к новым ролям."""
+    doc = extract("Scores differed, t(98) = 3.75, p = .001, b = 0.45, "
+                  "SE = 0.12, 95% CI [0.21, 0.69].")
+    claim = doc.claims[0]
+    for r in check_claim(claim, doc.source):
+        assert r.ok, f"[{r.slot}] {r.reason}: {r.detail}"
+
+
+def test_est_se_role_confusion_is_caught():
+    """Значение se записано в слот est — литерал настоящий, лежит по
+    месту (C1, C2 слепы), ловить обязан C3 (маркер роли), в точности
+    как role_confusion в corrupt.py для t/p."""
+    from dataclasses import replace as _replace
+
+    doc = extract("Scores differed, t(98) = 3.75, p = .001, b = 0.45, "
+                  "SE = 0.12, 95% CI [0.21, 0.69].")
+    claim = doc.claims[0]
+    se = claim.slots["se"]
+    fake_est = Slot("est", se.value, se.literal, se.span, se.decimals, "=")
+    broken = _replace(claim, slots={**claim.slots, "est": fake_est})
+    res = check_slot(broken.slots["est"], doc.source, broken)
+    assert not res.ok
+    assert res.reason == "role_missing"
+
+
+def test_ci_bounds_swapped_role_confusion_is_caught():
+    """ci_hi, записанный в слот ci_lo (например, если извлекатель перепутал
+    границы) — литерал настоящий, роль не подтверждается: перед верхней
+    границей стоит запятая/'to', а не 'CI ['."""
+    from dataclasses import replace as _replace
+
+    doc = extract("Scores differed, t(98) = 3.75, p = .001, "
+                  "95% CI [0.21, 0.69].")
+    claim = doc.claims[0]
+    hi = claim.slots["ci_hi"]
+    fake_lo = Slot("ci_lo", hi.value, hi.literal, hi.span, hi.decimals, "=")
+    broken = _replace(claim, slots={**claim.slots, "ci_lo": fake_lo})
+    res = check_slot(broken.slots["ci_lo"], doc.source, broken)
+    assert not res.ok
+    assert res.reason == "role_missing"
 
 
 def test_discriminates_paper_error_from_mis_extraction():

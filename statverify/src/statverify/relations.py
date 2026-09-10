@@ -28,6 +28,16 @@ class Relation:
     text: str
     designs: tuple          # дизайны, при которых отношение применимо
     solvers: Dict[str, Callable]
+    # Переменные, которые вправе быть гипотезой «эта врёт», при локализации.
+    # None означает «все vars» (обычный случай — R2a, R1a). Существует ради
+    # псевдо-слотов вроде alpha в R4:width: alpha участвует в решении
+    # (её значение нужно, чтобы получить t_crit), но она не заявлена в
+    # статье и не может быть виновной — это допущение, а не число из текста.
+    blamable: Optional[tuple] = None
+
+    @property
+    def blame_vars(self) -> tuple:
+        return self.blamable if self.blamable is not None else self.vars
 
     def applies_to(self, design: str) -> bool:
         return design in self.designs
@@ -108,7 +118,127 @@ R1A = Relation(
     solvers={"df": _df_from_n, "n": _n_from_df},
 )
 
-CATALOG: List[Relation] = [R2A, R1A]
+# --- R5: t = оценка / SE --------------------------------------------------
+# Пересекается с R2a по переменной t. Именно это пересечение и делает
+# локализацию возможной: испорченный t ломает оба отношения сразу,
+# а испорченный p или se ломает только одно — граф из двух отношений
+# различает виновника там, где одно отношение не могло (задача 1).
+
+def _t_from_est_se(k):
+    se = k["se"]
+    if se == 0.0:
+        return None
+    return k["est"] / se
+
+
+def _est_from_t_se(k):
+    return k["t"] * k["se"]
+
+
+def _se_from_t_est(k):
+    t = k["t"]
+    if t == 0.0:
+        return None
+    return k["est"] / t
+
+
+R5 = Relation(
+    key="R5",
+    vars=("est", "se", "t"),
+    text="t = оценка / SE",
+    # Формула верна для любого t-теста, но дизайн пока единственный
+    # в каталоге; расширить designs, когда появится R2b.
+    designs=("two_tailed_t",),
+    solvers={"t": _t_from_est_se, "est": _est_from_t_se, "se": _se_from_t_est},
+)
+
+
+# --- R4: доверительный интервал --------------------------------------------
+# Разложено на две связи, а не одну, ради монотонности (правило 1.4):
+# центр и полуширина CI по отдельности монотонны по каждому аргументу,
+# а «CI как единая формула от (est, se, df)» — нет, потому что интервал
+# несимметричен относительно ошибок в ci_lo и ci_hi по отдельности.
+#
+# alpha не заявлена в тексте как число само по себе — это допущение
+# (по умолчанию 0.05, т.е. 95% CI), которое verify.py обязан записать
+# в вердикт, если явного уровня в статье не нашлось (см. Claim.ci_alpha).
+# Поэтому alpha участвует в vars (нужна для решения), но не в blamable:
+# «alpha врёт» — это утверждение о допущении верификатора, не о статье.
+
+def _est_from_ci(k):
+    return (k["ci_lo"] + k["ci_hi"]) / 2.0
+
+
+def _cilo_from_est_cihi(k):
+    return 2.0 * k["est"] - k["ci_hi"]
+
+
+def _cihi_from_est_cilo(k):
+    return 2.0 * k["est"] - k["ci_lo"]
+
+
+R4_CENTER = Relation(
+    key="R4:center",
+    vars=("ci_lo", "ci_hi", "est"),
+    text="(ci_lo + ci_hi) / 2 = оценка",
+    designs=("two_tailed_t",),
+    solvers={"est": _est_from_ci, "ci_lo": _cilo_from_est_cihi,
+             "ci_hi": _cihi_from_est_cilo},
+)
+
+
+def _t_crit(df, alpha):
+    """Критическое |t|: t_from_p уже инвертирует p_two_tailed(t, df),
+    а t_crit(df, alpha) по определению — то t, при котором эта функция
+    равна alpha. Отдельной численной процедуры не требуется."""
+    return t_from_p(alpha, df)
+
+
+def _se_from_ciw(k):
+    tc = _t_crit(k["df"], k["alpha"])
+    if tc is None or tc == 0.0:
+        return None
+    return (k["ci_hi"] - k["ci_lo"]) / (2.0 * tc)
+
+
+def _cihi_from_ciw(k):
+    tc = _t_crit(k["df"], k["alpha"])
+    if tc is None:
+        return None
+    return k["ci_lo"] + 2.0 * tc * k["se"]
+
+
+def _cilo_from_ciw(k):
+    tc = _t_crit(k["df"], k["alpha"])
+    if tc is None:
+        return None
+    return k["ci_hi"] - 2.0 * tc * k["se"]
+
+
+def _df_from_ciw(k):
+    se = k["se"]
+    if se == 0.0:
+        return None
+    tc_needed = (k["ci_hi"] - k["ci_lo"]) / (2.0 * se)
+    if tc_needed <= 0.0:
+        return None
+    # df_from инвертирует p_two_tailed(t, df) = p относительно df; здесь
+    # p — это alpha, а t — требуемая критическая статистика. Та же
+    # функция, что решает R2a наоборот, без нового численного кода.
+    return df_from(tc_needed, k["alpha"])
+
+
+R4_WIDTH = Relation(
+    key="R4:width",
+    vars=("alpha", "ci_lo", "ci_hi", "df", "se"),
+    text="(ci_hi − ci_lo) / 2 = t_crit(df, alpha) · SE",
+    designs=("two_tailed_t",),
+    solvers={"se": _se_from_ciw, "ci_hi": _cihi_from_ciw,
+             "ci_lo": _cilo_from_ciw, "df": _df_from_ciw},
+    blamable=("ci_lo", "ci_hi", "df", "se"),   # alpha исключена — см. выше
+)
+
+CATALOG: List[Relation] = [R2A, R1A, R5, R4_CENTER, R4_WIDTH]
 
 
 def for_design(design: str) -> List[Relation]:

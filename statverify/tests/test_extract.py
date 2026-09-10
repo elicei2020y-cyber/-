@@ -68,3 +68,46 @@ def test_relation_is_recorded():
     """'p < .001' и 'p = .001' дают непересекающиеся интервалы."""
     doc = extract("A large effect emerged, t(31) = 4.21, p < .001.")
     assert doc.claims[0].slots["p"].relation == "<"
+
+
+# --- Задача 1: est/SE и доверительный интервал ------------------------
+
+@pytest.mark.parametrize("text,est,se", [
+    ("t(98) = 3.75, p = .001, b = 0.45, SE = 0.12.", 0.45, 0.12),
+    ("t(98) = 3.75, p = .001, β = .45 (SE = .12).", 0.45, 0.12),
+    ("t(98) = 3.75, p = .001, M = 3.2, SD = 1.1.", 3.2, 1.1),
+])
+def test_est_se_extracted(text, est, se):
+    doc = extract(text)
+    slots = doc.claims[0].slots
+    assert abs(slots["est"].value - est) < 1e-9
+    assert abs(slots["se"].value - se) < 1e-9
+
+
+@pytest.mark.parametrize("text", [
+    "t(98) = 3.75, p = .001, 95% CI [0.21, 0.69].",
+    "t(98) = 3.75, p = .001, 95% CI = 0.21 to 0.69.",
+])
+def test_ci_extracted(text):
+    doc = extract(text)
+    slots = doc.claims[0].slots
+    assert abs(slots["ci_lo"].value - 0.21) < 1e-9
+    assert abs(slots["ci_hi"].value - 0.69) < 1e-9
+    assert doc.claims[0].ci_alpha_explicit
+    assert abs(doc.claims[0].ci_alpha - 0.05) < 1e-9
+
+
+def test_ci_without_percentage_is_an_assumption():
+    """Без явного уровня CI решатель обязан пометить alpha=0.05 как
+    допущение (правило 1.2/8.5: ничего не проваливается молча)."""
+    doc = extract("t(98) = 3.75, p = .001, CI [0.21, 0.69].")
+    claim = doc.claims[0]
+    assert not claim.ci_alpha_explicit
+    assert abs(claim.ci_alpha - 0.05) < 1e-9
+
+
+def test_est_se_and_ci_together():
+    doc = extract("t(98) = 3.75, p = .001, b = 0.45, SE = 0.12, "
+                  "95% CI [0.21, 0.69].")
+    slots = doc.claims[0].slots
+    assert {"t", "df", "p", "est", "se", "ci_lo", "ci_hi"} <= set(slots)

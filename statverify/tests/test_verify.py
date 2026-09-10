@@ -35,22 +35,73 @@ def test_detects_inconsistency(case):
         f"t={t} df={df} p={p} (истинный {true_p:.6f}) не обнаружено")
 
 
-def test_localization_is_currently_ambiguous():
-    """Зафиксировано известное ограничение, а не желаемое поведение.
+def test_localization_is_ambiguous_without_r5_r4():
+    """Три переменные, одно отношение — задача недоопределена без R5/R4.
 
-    Три переменные, одно отношение — задача недоопределена, виновной
-    может быть любая. Нормальный предел оправдывает df примерно в 95%
-    случаев, сужая круг с трёх до двух, но не до одного.
+    Раньше это было единственное поведение локализации (задача 1 из
+    docs/TASK_FOR_CLAUDE_CODE.md ещё не сделана — CATALOG состоял из
+    R2a и пустого R1a). Теперь R5 и R4 в каталоге есть (relations.py),
+    но НЕ применимы к этим конкретным случаям: synth.build_cases()
+    строит только t, df, p, а Relation.solve требует все свои
+    переменные — без est/se/ci_lo/ci_hi R5 и R4 просто не входят в
+    `usable`, и остаётся ровно R2a, та же тройка, что и раньше.
 
-    Этот тест обязан упасть, когда будут добавлены R5 и R4 (задача 1
-    в docs/TASK_FOR_CLAUDE_CODE.md) — падение будет означать, что
-    локализация заработала, и тест надо заменить на проверку того,
-    что названа верная переменная.
+    Это не регресс и не обход задачи 1: test_localization_with_r5_r4
+    ниже показывает тот же граф на случаях, где все семь величин
+    присутствуют, — и там локализация действительно называет виновника.
     """
     statuses = {verify_claim(make_claim(t, df, p, dec)).status
                 for t, df, p, dec, _ in INCONSISTENT}
     assert statuses == {"INCONSISTENT_AMBIGUOUS"}, (
         f"локализация изменилась: {statuses} — обнови тест по существу")
+
+
+def test_localization_with_r5_r4():
+    """Задача 1, критерий приёмки: с графом R2a+R5+R4 локализация
+    называет виновника для шести величин из семи всегда, и для df —
+    в заметной, но меньшей доле случаев.
+
+    df — честное исключение, не послабление теста: t_crit(df, .05)
+    почти не меняется при df >= 24 (см. таблицу в run_step3.py, раздел
+    C, и docs/TASK_FOR_CLAUDE_CODE.md про 'не подгоняй пороги, разберись,
+    почему граф не различает'), поэтому ни R2a, ни R4:width не чувствуют
+    порчу df в этой области — это свойство самой t-статистики, а не
+    пробел в коде локализации. Разметка — из tests/synth7.py, того же
+    генератора, что и у scripts/run_step3.py, поэтому числа здесь и там
+    совпадают дословно.
+    """
+    from synth7 import VARS, build_grid, corrupt_case
+
+    cases = list(build_grid())
+    per_var = {v: [0, 0] for v in VARS}          # [верно, всего]
+    for df, est, se in cases:
+        for var in VARS:
+            v = verify_claim(corrupt_case(df, est, se, var))
+            per_var[var][1] += 1
+            if v.status == "INCONSISTENT" and v.var == var:
+                per_var[var][0] += 1
+
+    for var in VARS:
+        correct, total = per_var[var]
+        rate = correct / total
+        if var == "df":
+            assert rate >= 0.40, (
+                f"df: {correct}/{total} = {rate:.1%} — заметно хуже "
+                f"наблюдавшегося; если это регресс, а не улучшение, "
+                f"разберись прежде, чем поднимать порог")
+        else:
+            assert rate == 1.0, f"{var}: {correct}/{total} должно локализоваться всегда"
+
+
+def test_no_false_positive_seven_values():
+    """R5 и R4 не вносят ложных срабатываний на согласованных случаях —
+    то же требование правила 1.5, что и для R2a, теперь на всех семи
+    величинах разом."""
+    from synth7 import build_grid, gold, make_claim as make_claim7
+
+    for df, est, se in build_grid():
+        v = verify_claim(make_claim7(gold(df, est, se)))
+        assert v.status == "CONSISTENT", f"df={df} est={est} se={se} -> {v.line()}"
 
 
 def test_df_exonerated_by_normal_limit():

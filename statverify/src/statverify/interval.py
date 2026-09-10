@@ -93,4 +93,9 @@ DOMAIN = {
     "df": Interval(TINY, 1e9),
     "t": Interval(-1e6, 1e6),
     "n": Interval(1.0, 1e9),
+    "se": Interval(TINY, 1e9),           # стандартная ошибка положительна
+    "est": Interval(-1e6, 1e6),          # точечная оценка — любой знак
+    "ci_lo": Interval(-1e6, 1e6),
+    "ci_hi": Interval(-1e6, 1e6),
+    "alpha": Interval(TINY, 1.0 - TINY),  # псевдо-слот: уровень для CI (R4:width)
 }

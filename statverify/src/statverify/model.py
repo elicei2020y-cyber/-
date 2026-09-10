@@ -72,11 +72,22 @@ class Claim:
 
     span задаёт границу, за которую слоты не имеют права выходить.
     Это то, что не даёт взять df из соседнего теста.
+
+    ci_alpha — уровень значимости для доверительного интервала (R4:width),
+    т.е. alpha = 1 - уровень_CI. Не слот: это не заявленное число, которое
+    надо сверять с исходником литерал-в-литерал, а параметр, управляющий
+    тем, какую критическую t-статистику использовать. Если в тексте не
+    нашёлся явный процент ('95% CI' и т.п.), берётся допущение alpha=0.05,
+    и ci_alpha_explicit остаётся False — тогда verify.py обязан записать
+    это допущение в вердикт, а не применить его молча (см. задачу 1
+    в docs/TASK_FOR_CLAUDE_CODE.md).
     """
     span: Span
     design: str
     slots: Dict[str, Slot] = field(default_factory=dict)
     candidates: Dict[str, List[Slot]] = field(default_factory=dict)
+    ci_alpha: float = 0.05
+    ci_alpha_explicit: bool = False
 
     def with_slot(self, slot: Slot) -> "Claim":
         return replace(self, slots={**self.slots, slot.name: slot})

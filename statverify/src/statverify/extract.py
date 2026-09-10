@@ -59,6 +59,85 @@ _REL_CANON = {"=": "=", "==": "=", "<": "<", ">": ">", "≤": "<=", "≥": ">=",
 
 CANDIDATE_WINDOW = 60
 
+# Задача 1 (docs/TASK_FOR_CLAUDE_CODE.md, §2): b/β/M + SE/SD и доверительный
+# интервал — величины для R5 и R4. Как и p, они ищутся в окне ПОСЛЕ уже
+# найденного t()=... и присоединяются к тому же утверждению, а не образуют
+# новое: это те же семь взаимно согласованных чисел одного теста.
+#
+# Известное ограничение, честно, а не молча: окно ищет только вперёд по
+# тексту. Порядок 'b = .45, SE = .12, t(98) = 3.75, p = .001' (оценка
+# перед t-тестом) этим не покрывается — расширение до двустороннего окна
+# осталось бы за задачей 3 (модельный извлекатель), где решение о
+# границах утверждения в любом случае должно стать надёжнее регекса.
+EST_LABEL = r"[bβM]"
+SE_LABEL = r"SE|SD"
+
+EST_SE = re.compile(
+    rf"""
+    \b(?P<estlabel>{EST_LABEL})\s*[=:]\s*(?P<est>{_NUM_SIGNED})
+    \s*[,;(]*\s*
+    \b(?P<selabel>{SE_LABEL})\s*[=:]\s*(?P<se>{_NUM_SIGNED})
+    \)?
+    """,
+    re.VERBOSE,
+)
+
+CI_BRACKETS = re.compile(
+    rf"""
+    (?:(?P<pct>\d{{1,2}})\s*%\s*)?
+    CI\s*(?:[=:]\s*)?
+    \[\s*(?P<lo>{_NUM_SIGNED})\s*,\s*(?P<hi>{_NUM_SIGNED})\s*\]
+    """,
+    re.VERBOSE,
+)
+
+CI_TO = re.compile(
+    rf"""
+    (?:(?P<pct>\d{{1,2}})\s*%\s*)?
+    CI\s*[=:]?\s*
+    (?P<lo>{_NUM_SIGNED})\s+to\s+(?P<hi>{_NUM_SIGNED})
+    """,
+    re.VERBOSE,
+)
+
+ESTCI_WINDOW = 90
+
+
+def _attach_est_se(source: str, claim: Claim) -> Claim:
+    end = claim.span[1]
+    window = source[end:end + ESTCI_WINDOW]
+    m = EST_SE.search(window)
+    if m is None:
+        return claim
+    claim = claim.with_slot(Slot.from_match("est", source, (end + m.start("est"), end + m.end("est"))))
+    claim = claim.with_slot(Slot.from_match("se", source, (end + m.start("se"), end + m.end("se"))))
+    new_end = max(claim.span[1], end + m.end())
+    claim.span = (claim.span[0], new_end)
+    return claim
+
+
+def _attach_ci(source: str, claim: Claim) -> Claim:
+    end = claim.span[1]
+    window = source[end:end + ESTCI_WINDOW]
+    m = CI_BRACKETS.search(window) or CI_TO.search(window)
+    if m is None:
+        return claim
+    claim = claim.with_slot(Slot.from_match("ci_lo", source, (end + m.start("lo"), end + m.end("lo"))))
+    claim = claim.with_slot(Slot.from_match("ci_hi", source, (end + m.start("hi"), end + m.end("hi"))))
+    pct = m.group("pct")
+    if pct is not None:
+        claim.ci_alpha = round(1.0 - int(pct) / 100.0, 6)
+        claim.ci_alpha_explicit = True
+    new_end = max(claim.span[1], end + m.end())
+    claim.span = (claim.span[0], new_end)
+    return claim
+
+
+def _attach_est_ci(source: str, claim: Claim) -> Claim:
+    claim = _attach_est_se(source, claim)
+    claim = _attach_ci(source, claim)
+    return claim
+
 
 def _rel(raw: str) -> str:
     return _REL_CANON.get(raw, raw)
@@ -106,13 +185,15 @@ def extract(source: str) -> Document:
     taken: List[range] = []
 
     for m in TIGHT.finditer(source):
-        doc.claims.append(_claim_from_tight(source, m))
+        claim = _attach_est_ci(source, _claim_from_tight(source, m))
+        doc.claims.append(claim)
         taken.append(range(*m.span()))
 
     for m in LOOSE.finditer(source):
         if any(m.start() in r for r in taken):
             continue
-        doc.claims.append(_claim_from_loose(source, m))
+        claim = _attach_est_ci(source, _claim_from_loose(source, m))
+        doc.claims.append(claim)
 
     doc.claims.sort(key=lambda c: c.span[0])
     return doc
