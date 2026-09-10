@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statverify"
+version = "0.2.0"
+description = "Поиск внутренних противоречий в статистических утверждениях научных статей"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+# У рантайма зависимостей нет и не должно появиться: ядро верификатора
+# обязано работать без внешних пакетов. См. docs/ARCHITECTURE.md, 8.2.
+dependencies = []
+
+[project.optional-dependencies]
+# scipy — только оракул в тестах, никогда не рантайм.
+test = ["pytest>=7", "scipy>=1.10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
