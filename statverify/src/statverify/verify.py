@@ -126,17 +126,51 @@ def localize(usable: List[Relation], rep: Dict[str, Interval]) -> List[Hypothesi
     двусторонний p ограничен снизу нормальным пределом 2(1−Φ(|t|)),
     поэтому при сообщённом p ниже этого предела никакое df тройку
     не согласует.
+
+    Три разных положения отношения относительно гипотезы «врёт v», а не
+    два, и путать их значит дать голос тому, у кого его быть не должно:
+
+      1. v не входит в vars отношения вовсе — оно ПОДТВЕРЖДАЕТ или
+         ОПРОВЕРГАЕТ гипотезу тем, держится ли само по себе на
+         заявленных значениях (_relation_holds). Это обоснованно: если
+         v ни при чём, а отношение всё равно нарушено — виновата не
+         одна v.
+      2. v входит в vars И у отношения есть solvers[v] — оно ГОЛОСУЕТ:
+         предлагает значение v (через solve) и голосует «против», если
+         предложенное значение неприемлемо или расходится с другим
+         таким же голосом.
+      3. v входит в vars, но solvers[v] НЕТ — отношение не умеет ни
+         предложить v, ни (в отличие от случая 1) быть проверено «само
+         по себе» на заявленных значениях: раз v — его вход, а v сейчас
+         предполагается неверной, проверка через _relation_holds на
+         РЕПОРТИРОВАННОМ (неверном) v почти неизбежно провалится —
+         и это было бы засчитано как голос ПРОТИВ гипотезы, которую
+         сама эта неверная v и объясняет. Отношение в этом положении
+         обязано ВОЗДЕРЖАТЬСЯ — не голосовать ни за, ни против.
+
+    Смешение случаев 1 и 3 было настоящей ошибкой первой версии этого
+    исправления: относя R4:width (которое не умеет решать df — см.
+    relations.R4_WIDTH) к «уже держится сама по себе», локализация
+    проверяла R4:width на испорченном df и вето получала уже ЛЮБая df,
+    в том числе честно локализуемая раньше (df=10 и подобные) — это
+    было хуже, чем ошибка, которую чинили: правильных ответов стало
+    меньше, а не больше. Собственно голосующий вклад R4:width (случай 2)
+    был неисправен из-за асимптотической неустойчивости df_from — тот
+    отдельный разбор остаётся в relations.py.
     """
     all_vars = sorted({v for r in usable for v in r.blame_vars if v in rep})
     out = []
     for v in all_vars:
-        involved = [r for r in usable if v in r.vars]
-        uninvolved = [r for r in usable if v not in r.vars]
+        can_vote = [r for r in usable if v in r.vars and v in r.solvers]
+        must_hold = [r for r in usable if v not in r.vars]
+        # Случай 3 выше: v — вход отношения, но оно не умеет его решать.
+        # Не in must_hold (проверка на испорченном v дала бы ложный голос
+        # против) и не в can_vote (нечем голосовать) — воздержание.
 
         admissible = True
         reasons: List[str] = []
         derived_for_v: Optional[Interval] = None
-        for r in involved:
+        for r in can_vote:
             others = {k: iv for k, iv in rep.items() if k != v and k in r.vars}
             d = r.solve(v, others)
             ok, why = _plausible(v, d)
@@ -156,7 +190,7 @@ def localize(usable: List[Relation], rep: Dict[str, Interval]) -> List[Hypothesi
                     derived_for_v = inter
 
         if admissible:
-            for r in uninvolved:
+            for r in must_hold:
                 if not _relation_holds(r, rep):
                     admissible = False
                     reasons.append(f"{r.key}: без {v} остаётся противоречивым")

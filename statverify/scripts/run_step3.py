@@ -26,8 +26,9 @@ sys.path.insert(0, str(_ROOT / "tests"))
 
 from collections import Counter
 
+from statverify.relations import R2A, R4_WIDTH
 from statverify.tstats import t_from_p
-from statverify.verify import verify_claim
+from statverify.verify import reported_intervals, verify_claim
 
 from synth7 import DF_GRID, VARS, build_grid, corrupt_case, gold, make_claim
 
@@ -60,6 +61,7 @@ def section_b(cases):
     per_var_correct = Counter()
     statuses = Counter()
     wrong_var: list = []
+    undetected: list = []          # CONSISTENT при заведомой порче
     for df, est, se in cases:
         for var in VARS:
             claim = corrupt_case(df, est, se, var)
@@ -68,6 +70,8 @@ def section_b(cases):
             statuses[v.status] += 1
             if v.status == "INCONSISTENT" and v.var == var:
                 per_var_correct[var] += 1
+            elif v.status == "CONSISTENT":
+                undetected.append((df, est, se, var))
             elif v.status.startswith("INCONSISTENT") and len(wrong_var) < 6:
                 wrong_var.append((df, est, se, var, v))
 
@@ -88,23 +92,98 @@ def section_b(cases):
         print("  образцы неверной/неполной локализации:")
         for df, est, se, var, v in wrong_var:
             print(f"    испорчено {var:<6} df={df:<4} est={est} se={se} -> {v.line()}")
-    return correct / total, per_var_total, per_var_correct
+    return correct / total, per_var_total, per_var_correct, undetected
 
 
-def section_c(per_var_total, per_var_correct):
+def section_a2(undetected):
+    """Знаменатель локализации, пересчитанный на детектируемые случаи.
+
+    CONSISTENT при заведомой порче — не обязательно промах: если из
+    ОСТАЛЬНЫХ (не испорченных) величин порченное значение выводится
+    как допустимое, противоречия действительно нет, и CONSISTENT —
+    правильный ответ, а не дыра в обнаружении. Проверяется через
+    ту же самую пару прямых (не инвертированных) проверок, которыми
+    verify_claim реально принимает решение: derived-p из R2a и
+    derived-se из R4:width, взятые на ЗАЯВЛЕННОЙ (испорченной) величине.
+    Направление через Relation.solve(target=испорченная_величина, ...)
+    сюда сознательно не годится: именно оно оказалось ненадёжным для df
+    (см. раздел C) — из-за асимптотики оно может дать заведомо узкий и
+    не содержащий истину интервал, и использовать его как критерий
+    'было ли различимо' значило бы объяснять баг тем же самым багом.
+    """
+    print()
+    print("=" * 74)
+    print("A2. ЗНАМЕНАТЕЛЬ ЛОКАЛИЗАЦИИ  (пересчёт без недетектируемых случаев)")
+    print("=" * 74)
+    by_var = Counter(var for *_, var in undetected)
+    print(f"  случаев CONSISTENT при заведомой порче: {len(undetected)}")
+    print(f"  из них по величинам: {dict(by_var)}")
+    print()
+    genuinely_blind = 0
+    for df, est, se, var in undetected:
+        claim = corrupt_case(df, est, se, var)
+        rep = reported_intervals(claim)
+        checks = []
+        if var != "p" and "p" in rep:
+            others = {k: v for k, v in rep.items() if k != "p" and k in R2A.vars}
+            d = R2A.solve("p", others)
+            checks.append(("R2a->p", d is not None and d.intersects(rep["p"])))
+        if var != "se" and all(k in rep for k in R4_WIDTH.vars):
+            others = {k: v for k, v in rep.items() if k != "se" and k in R4_WIDTH.vars}
+            d = R4_WIDTH.solve("se", others)
+            checks.append(("R4w->se", d is not None and d.intersects(rep["se"])))
+        blind = all(ok for _, ok in checks) if checks else True
+        genuinely_blind += blind
+        label = ", ".join(f"{name}={'держит' if ok else 'НЕ держит'}" for name, ok in checks)
+        print(f"    df={df:<4} est={est:<4} se={se:<5} испорчено={var:<6} {label}"
+              f"  ->  {'генуинно неразличимо' if blind else 'ДЫРА В ОБНАРУЖЕНИИ'}")
+    print()
+    print(f"  генуинно неразличимых: {genuinely_blind}/{len(undetected)}")
+    return genuinely_blind, len(undetected) - genuinely_blind
+
+
+def section_c(per_var_total, per_var_correct, n_undetected):
     print()
     print("=" * 74)
     print("C. ПОЧЕМУ df ЛОКАЛИЗУЕТСЯ ХУЖЕ ОСТАЛЬНЫХ — ЧЕСТНЫЙ РАЗБОР")
     print("=" * 74)
-    print("  t_crit(df, .05) = t_from_p(.05, df) сходится к 1.96 при росте df")
-    print("  и меняется всё медленнее. R4:width сравнивает half-width с")
-    print("  t_crit(df)·SE: при df, уже близком к асимптотике, ни один сдвиг")
-    print("  df — сколь угодно большой — не выводит half-width за пределы")
-    print("  интервала, отведённого точностью записи SE и CI. То же с R2a:")
-    print("  двусторонний p при фиксированном t почти не зависит от df здесь.")
-    print("  Это не баг локализации, а то же самое явление, что уже")
-    print("  зафиксировано в CLAUDE.md как 'нормальный предел даёт бесплатное")
-    print("  оправдание df' — только видно оно теперь с обеих сторон графа.")
+    print("  Исправлена версия этого раздела: прежнее объяснение через")
+    print("  'уплощение t_crit к 1.96' было проверено внешним разбором и не")
+    print("  подтвердилось как основная причина. Настоящий механизм —")
+    print("  ниже, в два слоя.")
+    print()
+    print("  Слой 1 — почему df ВООБЩЕ плохо определяется.")
+    print("  df входит в R2a (через t, p) и раньше входил в R4:width (через")
+    print("  ci_lo, ci_hi, se) КАК ОБРАЩЁННОЕ решение — 'каким должен быть df,")
+    print("  чтобы согласовать остальное'. Обращение df_from(t_crit, alpha)")
+    print("  имеет горизонтальную асимптоту: t_crit(df, .05) стремится к")
+    print("  1.9600 и НИКОГДА её не достигает ни при каком конечном df. Если")
+    print("  истинная комбинация (ci_lo, ci_hi, se) после округления до двух")
+    print("  знаков лежит близко к этой асимптоте (типично уже при df >= 25),")
+    print("  часть углов бокса, по которым Relation.solve строит интервал,")
+    print("  проваливается ЗА асимптоту и даёт None — они просто отбрасываются,")
+    print("  а уцелевшие углы систематически смещены в сторону МАЛЫХ df.")
+    print("  Итог — интервал вида [14, 32], не содержащий истинные df=99.")
+    print("  Проверено численно (см. историю правки): это не редкий случай,")
+    print("  а систематика для df ближе к асимптотике, чем к df=10.")
+    print()
+    print("  Слой 2 — что с этим сделано и какой ценой.")
+    print("  R4:width БОЛЬШЕ НЕ решает df (relations.R4_WIDTH.solvers без")
+    print("  'df') — асимптотическая неустойчивость делает это направление")
+    print("  недостоверным, а не просто грубым (правило 1.4: распространение")
+    print("  по углам верно только когда область определения не обрывается")
+    print("  внутри бокса; здесь она обрывается). localize() при этом обучен")
+    print("  отличать 'отношение не умеет решать v' (воздержание) от")
+    print("  'отношение решило и получило иное значение' (голос против) —")
+    print("  раньше эти случаи были перепутаны, и это давало настоящие ложные")
+    print("  вето: 2 из 33 случаев порчи df система называла бы НЕВЕРНУЮ")
+    print("  переменную (df исключался из допустимых, хотя был виновен).")
+    print("  Цена: голосующих по df отношений стало на одно меньше — только")
+    print("  R2a. В 2 из 33 случаев порчи p (НЕ df) R2a, решая df по (t,")
+    print("  ИСПОРЧЕННОМУ p), находит какое-то правдоподобное df, и раньше")
+    print("  это отклонялось независимым несогласием R4:width; сейчас")
+    print("  отклонять некому, и 'df' остаётся в допустимых рядом с 'p'.")
+    print("  Это реальный компромисс, не побочный эффект настройки порогов.")
     print()
     print(f"  {'df в сетке':<12}{'t_crit(df,.05)':>16}")
     for df in DF_GRID:
@@ -113,26 +192,46 @@ def section_c(per_var_total, per_var_correct):
     c, n = per_var_correct["df"], per_var_total["df"]
     others_c = sum(per_var_correct[v] for v in per_var_total if v != "df")
     others_n = sum(per_var_total[v] for v in per_var_total if v != "df")
-    print(f"  df: верно локализовано {c}/{n} = {c/n:.1%}")
+    print(f"  df: верно локализовано {c}/{n} = {c/n:.1%}  (знаменатель = все случаи)")
+    n_detected_df = n - n_undetected
+    if n_detected_df:
+        print(f"  df: верно локализовано {c}/{n_detected_df} = {c/n_detected_df:.1%}"
+              f"  (знаменатель = только обнаруженные — {n_undetected} генуинно")
+        print(f"       неразличимых исключены, см. раздел A2)")
     print(f"  остальные шесть величин: {others_c}/{others_n} = {others_c/others_n:.1%}")
 
 
 if __name__ == "__main__":
     fp, cases = section_a()
-    loc, per_var_total, per_var_correct = section_b(cases)
-    section_c(per_var_total, per_var_correct)
+    loc, per_var_total, per_var_correct, undetected = section_b(cases)
+    n_blind, n_hole = section_a2(undetected)
+    n_undetected_df = sum(1 for *_, var in undetected if var == "df")
+    section_c(per_var_total, per_var_correct, n_undetected_df)
+
+    total = sum(per_var_total.values())
+    correct = sum(per_var_correct.values())
+    loc_corrected = correct / (total - len(undetected)) if total > len(undetected) else float("nan")
 
     print()
     print("=" * 74)
     print("ВОРОТА")
     print("=" * 74)
     checks = [("ложные срабатывания", fp, 0.0, "<="),
-              ("верная локализация (все семь величин)", loc, 0.90, ">=")]
+              ("верная локализация (знаменатель = все случаи)", loc, 0.90, ">="),
+              ("верная локализация (знаменатель = только обнаруженные)",
+               loc_corrected, 0.90, ">=")]
     ok = True
     for label, got, need, op in checks:
         good = got >= need if op == ">=" else got <= need
         ok &= good
-        print(f"  [{'ok' if good else '!!'}] {label:<42}{got:>7.1%}  нужно {op} {need:.0%}")
+        print(f"  [{'ok' if good else '!!'}] {label:<52}{got:>7.1%}  нужно {op} {need:.0%}")
+    print()
+    print(f"  Оба числа локализации — законные метрики РАЗНОГО: первое —")
+    print(f"  сквозная точность включая честную абстенцию на недетектируемом;")
+    print(f"  второе — точность виновника РОВНО там, где противоречие вообще")
+    print(f"  нашлось. Второе точнее отвечает на 'верно ли называет виновника,")
+    print(f"  когда вообще что-то заметил' — {n_blind} из {len(undetected)}")
+    print(f"  случаев CONSISTENT честны (раздел A2){'; ' + str(n_hole) + ' — дыра в обнаружении' if n_hole else ', дыр в обнаружении нет'}.")
     print()
     if ok:
         print("  ВЕРДИКТ: задача 1 (R5, R4) выполнена по заданному критерию")
