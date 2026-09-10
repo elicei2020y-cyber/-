@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from .interval import DOMAIN, Interval, from_reported
 from .model import Claim
 from .relations import Relation, for_design
+from .tstats import p_two_tailed
 
 # Правдоподобие для отсева гипотез при локализации. Это не мягкие
 # эвристики из L6, а жёсткие ограничения предметной области: t-статистика
@@ -40,9 +41,23 @@ class Verdict:
     # когда уровень не был указан в тексте явно) — правило 1.2/8.5:
     # ничего не проваливается в вердикт молча.
     assumptions: List[str] = field(default_factory=list)
+    # Расхождение, вероятно, объясняется печатью нижнего порога ('p = .001'
+    # вместо настоящего значения, на порядки меньшего) — см. _floor_convention.
+    # НЕ переводит вердикт в CONSISTENT: противоречие в заявленных числах
+    # остаётся, называется лишь его вероятное происхождение. Разница
+    # существенна, потому что настоящий p при такой печати утрачен и
+    # проверить дальше нельзя (docs/CORPUS_REAL_NOTES.md).
+    floor_convention: bool = False
+    floor_threshold: Optional[float] = None
 
     def _tail(self) -> str:
-        return f" [{'; '.join(self.assumptions)}]" if self.assumptions else ""
+        notes = list(self.assumptions)
+        if self.floor_convention:
+            notes.append(
+                f"расхождение может объясняться печатью нижнего порога "
+                f"p={self.floor_threshold:g} — настоящий p утрачен при печати, "
+                f"проверить точнее нельзя")
+        return f" [{'; '.join(notes)}]" if notes else ""
 
     def line(self) -> str:
         if self.status == "CONSISTENT":
@@ -201,6 +216,48 @@ def localize(usable: List[Relation], rep: Dict[str, Interval]) -> List[Hypothesi
     return out
 
 
+# SPSS и часть журналов печатают 'p = .001' (или .05/.01/.0001) для всего,
+# что меньше порога, — не ошибка авторов, а способ печати. Найдено на
+# реальном корпусе (docs/CORPUS_REAL_NOTES.md): 5 из 8 расхождений на 49
+# утверждениях из настоящих статей PLOS ONE именно такие.
+_FLOOR_THRESHOLDS = (0.05, 0.01, 0.001, 0.0001)
+
+
+def _floor_convention(claim: Claim) -> Optional[float]:
+    """Порог, объясняющий расхождение печатью, если условие выполнено.
+
+    Условие жёсткое и проверяемое, не эвристика и не смягчение вердикта:
+    отношение записано как '=', сообщённый p совпадает РОВНО с одним из
+    типовых порогов, и точно вычисленный двусторонний p по заявленным
+    (точечным, не интервальным) t и df строго меньше сообщённого. Сравнение
+    здесь намеренно точечное, не интервальное: вопрос не «пересекаются ли
+    интервалы записи», а «настоящий p меньше того, что напечатано, ровно
+    настолько, насколько ожидается при усечении к порогу» — то же
+    вычисление, что в scripts/build_corpus_real.py, при котором находка
+    и была впервые замечена.
+
+    Ничего не решает за пользователя: возвращает порог как кандидатное
+    объяснение, а не сигнал ослабить вердикт. Статья, напечатавшая
+    'p = .001' вместо истинных 3e-11, всё ещё содержит утверждение, чей
+    истинный p нельзя восстановить точнее этого порога, — то есть
+    настоящую, не устранимую неопределённость, а не просто найденную и
+    объяснённую придирку.
+    """
+    t_slot = claim.slots.get("t")
+    df_slot = claim.slots.get("df")
+    p_slot = claim.slots.get("p")
+    if not (t_slot and df_slot and p_slot):
+        return None
+    if p_slot.relation != "=":
+        return None
+    threshold = next((th for th in _FLOOR_THRESHOLDS
+                       if abs(p_slot.value - th) < 1e-12), None)
+    if threshold is None:
+        return None
+    exact = p_two_tailed(t_slot.value, df_slot.value)
+    return threshold if exact < p_slot.value else None
+
+
 def _ci_assumption(claim: Claim, usable: List[Relation]) -> List[str]:
     uses_ci = any(r.key == "R4:width" for r in usable)
     if uses_ci and not claim.ci_alpha_explicit:
@@ -253,12 +310,16 @@ def verify_claim(claim: Claim) -> Verdict:
     hyps = localize(usable, rep)
     live = [h for h in hyps if h.admissible]
     rel_label = ", ".join(sorted({r.key for r in violated}))
+    floor_threshold = _floor_convention(claim)
+    floor_kwargs = dict(floor_convention=floor_threshold is not None,
+                         floor_threshold=floor_threshold)
     if len(live) == 1:
         h = live[0]
         return Verdict("INCONSISTENT", rel_label, h.var, h.derived,
-                       rep[h.var], hypotheses=hyps, assumptions=assumptions)
+                       rep[h.var], hypotheses=hyps, assumptions=assumptions,
+                       **floor_kwargs)
     if not live:
         return Verdict("INCONSISTENT_UNLOCALIZED", rel_label, hypotheses=hyps,
-                       assumptions=assumptions)
+                       assumptions=assumptions, **floor_kwargs)
     return Verdict("INCONSISTENT_AMBIGUOUS", rel_label, hypotheses=hyps,
-                   assumptions=assumptions)
+                   assumptions=assumptions, **floor_kwargs)
