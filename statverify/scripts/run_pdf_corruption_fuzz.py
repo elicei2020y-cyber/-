@@ -27,12 +27,13 @@ sys.path.insert(0, str(_ROOT / "tests"))
 from collections import defaultdict
 
 from corpus_real import CORPUS_REAL
-from pdf_corrupt import CORRUPTIONS, column_splicing, ground_truth, resolve_after_corruption
+from pdf_corrupt import (CORRUPTIONS, COLUMN_SPLICE_KINDS, column_splicing,
+                          ground_truth, resolve_after_corruption)
 
 RECORDS = [r for r in CORPUS_REAL if r.get("has_t_test")]
 
 
-def run_one(rec, corruption_name, corrupt_fn):
+def run_one(rec, corrupt_fn):
     gt = ground_truth(rec["text"])
     assert gt is not None, f"{rec['id']}: истина не извлекается из чистого текста"
     corrupted = corrupt_fn(rec["text"], gt)
@@ -50,37 +51,39 @@ def run_one(rec, corruption_name, corrupt_fn):
 
 def main() -> int:
     all_corruptions = dict(CORRUPTIONS)
-    all_corruptions["column_splicing"] = None  # обрабатывается отдельно ниже
+    for kind in COLUMN_SPLICE_KINDS:
+        # три реалистичных вида вытекания колонки — каждый своя строка
+        # отчёта, не одна усреднённая 'column_splicing': прошлая версия
+        # порчи (одна неправдоподобная форма) показала 0%, скрыв то,
+        # что реалистичные формы держались на 100% несмотря на "починку".
+        all_corruptions[f"column_splicing:{kind}"] = (
+            lambda t, g, k=kind: column_splicing(t, g, k))
 
     outcomes = defaultdict(lambda: defaultdict(int))
     dangerous_cases = defaultdict(list)
 
-    for name in all_corruptions:
-        for i, rec in enumerate(RECORDS):
-            if name == "column_splicing":
-                gt = ground_truth(rec["text"])
-                assert gt is not None
-                foreign = RECORDS[(i + 1) % len(RECORDS)]["text"]
-                outcome = run_one(rec, name,
-                                   lambda t, g, f=foreign: column_splicing(t, g, f))
-            else:
-                outcome = run_one(rec, name, CORRUPTIONS[name])
+    for name, fn in all_corruptions.items():
+        for rec in RECORDS:
+            outcome = run_one(rec, fn)
             outcomes[name][outcome] += 1
             if outcome == "wrong_admitted":
                 dangerous_cases[name].append(rec["id"])
 
-    order = ["ligatures", "soft_hyphen", "linebreak_in_number", "lost_space",
-             "footnote_glued", "column_splicing", "ocr_l1_o0"]
+    order = (["ligatures", "soft_hyphen", "linebreak_in_number", "lost_space",
+              "footnote_glued"]
+             + [f"column_splicing:{k}" for k in sorted(COLUMN_SPLICE_KINDS)]
+             + ["ocr_l1_o0"])
     n = len(RECORDS)
 
-    print("=" * 100)
+    NAME_W = 36
+    print("=" * (NAME_W + 64))
     print(f"ПОРЧА ИЗВЛЕЧЕНИЯ ИЗ PDF — {n} утверждений корпуса (has_t_test=True)")
-    print("=" * 100)
-    header = (f"{'вид порчи':<22}{'применимо':>10}{'не найдено':>12}"
+    print("=" * (NAME_W + 64))
+    header = (f"{'вид порчи':<{NAME_W}}{'применимо':>10}{'не найдено':>12}"
               f"{'отклонено':>11}{'верно':>8}{'НЕВЕРНО+ПРОШЛО':>16}"
               f"{'доля опасных':>14}")
     print(header)
-    print("-" * 100)
+    print("-" * (NAME_W + 64))
     total_applicable = 0
     total_wrong = 0
     for name in order:
@@ -90,13 +93,13 @@ def main() -> int:
         total_applicable += applicable
         total_wrong += wrong
         frac = f"{wrong}/{n} = {100.0*wrong/n:.1f}%"
-        print(f"{name:<22}{applicable:>10}{o.get('not_found', 0):>12}"
+        print(f"{name:<{NAME_W}}{applicable:>10}{o.get('not_found', 0):>12}"
               f"{o.get('rejected', 0):>11}{o.get('correct_admitted', 0):>8}"
-              f"{wrong:>16}{frac:>14}")
-    print("-" * 100)
+              f"{wrong:>16} {frac:>14}")
+    print("-" * (NAME_W + 64))
     total_slots = n * len(order)
-    print(f"суммарно по всем 7 видам порчи: {total_wrong} опасных случаев из "
-          f"{total_slots} (43 утверждения x 7 видов) = "
+    print(f"суммарно по всем {len(order)} видам порчи: {total_wrong} опасных "
+          f"случаев из {total_slots} (43 утверждения x {len(order)} видов) = "
           f"{100.0*total_wrong/total_slots:.1f}%")
 
     if any(dangerous_cases.values()):
@@ -105,8 +108,8 @@ def main() -> int:
             if ids:
                 print(f"  {name}: {ids}")
     else:
-        print("\nНи одного случая 'неверное значение прошло охранника' не найдено "
-              "ни на одном виде порчи из семи.")
+        print(f"\nНи одного случая 'неверное значение прошло охранника' не "
+              f"найдено ни на одном виде порчи из {len(order)}.")
 
     return 0
 

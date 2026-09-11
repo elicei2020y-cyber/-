@@ -53,8 +53,18 @@ CORPUS: List[Dict[str, Any]] = [
          claims=[dict(t=2.90, df=72.0, p=0.005, prel="=")]),
     dict(id="sentence_break", text="The main effect held, t(99) = 2.45. This was reliable, p = .016.",
          claims=[dict(t=2.45, df=99.0, p=0.016, prel="=")]),
+    # Раньше ожидался успешный разбор через физический перенос строки —
+    # изменено сознательно (не регресс): реальная склейка колонок
+    # вклинивается ИМЕННО через перенос строки (вытекание из PDF иначе
+    # не бывает), поэтому extract._claim_from_loose теперь продвигает
+    # единственного кандидата в слот, только если между t-образцом и
+    # кандидатом НЕТ переноса строки — иначе он неотличим от вклинившейся
+    # колонки и уходит в кандидаты (AMBIGUOUS_PARSE), как и другие честно
+    # неоднозначные случаи ниже. Потеря измерена: на corpus_real.py (43
+    # реальных утверждения) — ноль, там перенос между t и p не встречается
+    # ни разу; здесь, в синтетическом случае, — да, и это цена защиты.
     dict(id="line_break", text="Reaction times differed, t(99) = 2.45,\np = .016.",
-         claims=[dict(t=2.45, df=99.0, p=0.016, prel="=")]),
+         claims=[dict(t=2.45, df=99.0, p=None, prel=None)]),
     dict(id="ambiguous_p", text="The test gave t(99) = 2.45. Both p = .016 and p = .023 appear.",
          claims=[dict(t=2.45, df=99.0, p=None, prel=None)]),
     dict(id="no_p", text="The comparison produced t(99) = 2.45 for the primary outcome.",

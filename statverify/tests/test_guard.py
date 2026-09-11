@@ -154,13 +154,11 @@ def test_c5_catches_linebreak_truncated_number():
 
 
 def test_c5_no_false_rejection_on_real_corpus():
-    """C5 — новый критерий, и у него есть названный остаточный риск
-    (guard.py, комментарий у _LINE_ARTIFACT): 'p = .016\\n3 participants'
-    даёт ложный отказ. Здесь — эмпирическая проверка того, что на всех
-    43 настоящих (has_t_test) утверждениях corpus_real.py этот риск не
-    реализуется: подтверждено, что после каждого span в чистом тексте
-    корпуса стоит '.', ',', ')' или пробел с буквой — ни разу цифра
-    через перенос — поэтому C5 не даёт ни одного НОВОГО отказа."""
+    """Эмпирическая проверка того, что на всех 43 настоящих
+    (has_t_test) утверждениях corpus_real.py C5 не даёт ни одного
+    НОВОГО ложного отказа: подтверждено, что после каждого span в
+    чистом тексте корпуса стоит '.', ',', ')' или пробел с буквой —
+    ни разу цифра через перенос."""
     for rec in CORPUS_REAL:
         if not rec.get("has_t_test"):
             continue
@@ -169,3 +167,37 @@ def test_c5_no_false_rejection_on_real_corpus():
                      if {"t", "df", "p"} <= set(c.slots))
         for r in check_claim(claim, rec["text"]):
             assert r.ok, f"{rec['id']} [{r.slot}] {r.reason}: {r.detail}"
+
+
+def test_c5_does_not_confuse_section_number_with_truncation():
+    """C5 после первой версии ложно бра́ковал узор
+    '..., p = .016.\\n3.2 Secondary analyses' — конец предложения,
+    затем номер раздела. Причина: допуск на один '.' перед разрывом
+    (нужен для чисел без обязательной дробной части вроде t/df, где
+    настоящий обрыв '3.82' -> '3.\\n82' даёт литерал БЕЗ точки) слепо
+    поглощал и настоящую точку конца предложения, после чего цифра
+    номера раздела читалась как продолжение дробной части. Сужено:
+    пропуск точки запрещён, если цифра сразу после разрыва сама
+    открывает 'N.' или 'N ' (числовой узор раздела/главы) — настоящий
+    обрыв дробной части так не выглядит.
+
+    Симметричная проверка: та же цифра БЕЗ точки перед разрывом (когда
+    пропускать нечего — например, дробная часть p уже завершена) по-
+    прежнему обязана ловиться, даже если продолжение (не сам разрыв)
+    оканчивается пробелом, как в 'p = .01\\n6 (marginally significant)'.
+    """
+    honest = ("Scores differed, t(99) = 2.45, p = .016.\n"
+              "3.2 Secondary analyses revealed no further effects.")
+    doc = extract(honest)
+    claim = next(c for c in doc.claims if {"t", "df", "p"} <= set(c.slots))
+    for r in check_claim(claim, honest):
+        assert r.ok, f"[{r.slot}] {r.reason}: {r.detail} — ложный отказ на легитимном тексте"
+
+    truncated = "Scores differed, t(99) = 2.45, p = .01\n6."
+    doc2 = extract(truncated)
+    claim2 = next(c for c in doc2.claims if "p" in c.slots)
+    assert claim2.slots["p"].value == 0.01        # усечённый литерал '.01'
+    res = check_slot(claim2.slots["p"], truncated, claim2)
+    assert not res.ok and res.reason == "truncated_literal", (
+        "настоящий обрыв без точки-перед-разрывом обязан ловиться "
+        "независимо от того, чем оканчивается цифра продолжения")

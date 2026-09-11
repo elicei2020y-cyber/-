@@ -106,11 +106,45 @@ def footnote_glued(text: str, gt: Claim) -> Optional[str]:
     return text[:hi] + "¹" + text[hi:]
 
 
-def column_splicing(text: str, gt: Claim, foreign: str) -> Optional[str]:
-    """Склейка колонок: между t(...) = ... и p = ... вклинивается
-    хвост ДРУГОГО предложения из соседней колонки — реальный артефакт
-    построчного считывания двухколоночной вёрстки поверх текстового
-    потока. foreign — фрагмент из НЕСВЯЗАННОГО утверждения корпуса."""
+# Три реалистичных вида вытекания колонки — ни один не содержит 't(':
+# настоящая склейка колонок происходит между СОВЕРШЕННО другими
+# фрагментами документа, обнаружение общего 't(' в них было бы
+# совпадением, а не правилом. Все три несут собственное 'p = ...',
+# иначе вклинивание не создало бы ложного кандидата вовсе.
+COLUMN_SPLICE_KINDS: Dict[str, str] = {
+    "table_row": ("M = 2.10, SD = 0.45, p = {p}, N = 24 per condition, "
+                  "age and sex controlled for as covariates"),
+    "sentence_fragment": ("in line with prior reports, p = {p}, effects "
+                          "varied across the three replication sites tested"),
+    "figure_caption": ("Fig. 2. Error bars denote SEM, p = {p}, asterisks "
+                       "mark significant pairwise comparisons"),
+}
+
+
+def column_splicing(text: str, gt: Claim, kind: str, foreign_p: str = ".731") -> Optional[str]:
+    """Склейка колонок: между t(...) = ... и его собственным p = ...
+    вклинивается фрагмент соседней колонки/таблицы/подписи.
+
+    ВТОРАЯ ВЕРСИЯ этой функции, ПЕРВАЯ была неправдоподобной и не
+    воспроизводила артефакт: не вставляла перенос строки вовсе (в
+    извлечённом из PDF тексте вытекание колонки СВОИМ переносом строки
+    приходит всегда — иначе это не вытекание колонки, а просто соседний
+    текст на той же строке) и вклинившийся фрагмент всегда содержал
+    собственный 't(', из-за чего 'обрубить окно поиска на next-t('
+    выглядело как починка, а на деле ловило только ту форму склейки,
+    которую сама порча гарантированно создавала. Ревью, смоделировавшее
+    реальные варианты (строка таблицы, обрывок предложения, подпись к
+    рисунку — ни один не содержит 't('), нашло, что дыра оставалась
+    открыта на 86% несмотря на 0% в отчёте по старой порче.
+
+    Три вида (kind), ни один не содержит 't(' — настоящая склейка
+    колонок бывает именно между такими разнородными фрагментами:
+      table_row         — строка таблицы со своим столбцом p
+      sentence_fragment — обрывок соседнего предложения с p-значением
+      figure_caption    — подпись к рисунку с указанием значимости
+    """
+    fragment = COLUMN_SPLICE_KINDS[kind].format(p=foreign_p)
+    assert "t(" not in fragment, f"порча {kind!r} не должна содержать t("
     t = gt.slots.get("t")
     p = gt.slots.get("p")
     if t is None or p is None:
@@ -118,7 +152,7 @@ def column_splicing(text: str, gt: Claim, foreign: str) -> Optional[str]:
     cut = t.span[1]
     if cut >= p.span[0]:
         return None
-    junk = " " + foreign.strip()[:70] + " "
+    junk = "\n" + fragment + "\n"
     return text[:cut] + junk + text[cut:]
 
 
