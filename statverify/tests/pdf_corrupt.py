@@ -17,8 +17,10 @@
 """
 
 import re
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
+from statverify.extract import extract
+from statverify.guard import admit
 from statverify.model import Claim
 
 Corruption = Callable[[str, Claim], Optional[str]]
@@ -139,3 +141,47 @@ CORRUPTIONS: Dict[str, Corruption] = {
     # column_splicing взят отдельно в раннере: ему нужен foreign-фрагмент
     "ocr_l1_o0": ocr_l1_o0,
 }
+
+
+def ground_truth(text: str) -> Optional[Claim]:
+    """Claim, извлечённый из НЕИСПОРЧЕННОГО текста — источник истинных
+    литералов/смещений для прицельной порчи и истинных значений для
+    сверки после неё."""
+    doc = extract(text)
+    for c in doc.claims:
+        if {"t", "df", "p"} <= set(c.slots):
+            return c
+    return None
+
+
+def resolve_after_corruption(
+    text: str, true_t: float, true_df: float
+) -> Tuple[Optional[Claim], bool, Optional[Dict[str, float]]]:
+    """Извлечь t/df/p из (возможно испорченного) текста заново, прогнать
+    через охранник, вернуть (claim_или_None, admitted, values_или_None).
+
+    Ищем claim по СОВПАДЕНИЮ (t, df) с истинными значениями исходного
+    утверждения, а не первый попавшийся с полной тройкой слотов: у
+    вклинившегося (column_splicing) фрагмента может обнаружиться СВОЙ,
+    отдельный claim с собственной, верной для НЕГО тройкой — взять
+    первый без разбора значило бы сверять истину одного утверждения со
+    значениями другого.
+
+    values — только если t/df/p сидят как конкретные, однозначно
+    разрешённые слоты (не кандидаты): если p ушёл в список кандидатов
+    или пропал вовсе, это честная неоднозначность/абстенция (L5b), а
+    не 'извлекатель ошибся молча' — такие случаи считаются 'не
+    найдено', ровно по логике guard.py (правило 6 CLAUDE.md)."""
+    doc = extract(text)
+    own = [c for c in doc.claims
+           if "t" in c.slots and "df" in c.slots
+           and abs(c.slots["t"].value - true_t) < 1e-9
+           and abs(c.slots["df"].value - true_df) < 1e-9]
+    if not own:
+        return None, False, None
+    c = own[0]
+    if "p" not in c.slots:
+        return c, False, None
+    ok, _results = admit(c, text)
+    values = {n: c.slots[n].value for n in ("t", "df", "p")}
+    return c, ok, values

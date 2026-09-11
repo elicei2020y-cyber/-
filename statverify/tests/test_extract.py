@@ -111,3 +111,43 @@ def test_est_se_and_ci_together():
                   "95% CI [0.21, 0.69].")
     slots = doc.claims[0].slots
     assert {"t", "df", "p", "est", "se", "ci_lo", "ci_hi"} <= set(slots)
+
+
+def test_loose_boundary_excludes_column_spliced_p_with_own_t_test():
+    """ДЫРА 2 (найдена мутационным фаззингом PDF-порчи, реальный случай
+    corpus_real.py id='A01' + 'A02', PLOS ONE 10.1371/journal.pone.0267297):
+    склейка колонок вклинивает фрагмент соседней колонки между
+    't(15) = 3.82' и его собственным 'p = .002)'. Вклинившийся фрагмент
+    несёт СВОЙ t(27) раньше своего собственного 'p = .030'.
+
+    До починки _claim_from_loose растягивал span утверждения до
+    НАЙДЕННОГО кандидата p, и C0 в guard.py ('кандидат внутри границ
+    утверждения') проверяла вложенность в границу, построенную по тому
+    же кандидату, — тождественно истинно по построению. Извлекатель
+    подменял p = .002 на чужой p = .030, и охранник это пропускал.
+
+    Теперь окно поиска p обрывается на начале чужого t(...) НЕЗАВИСИМО
+    от того, что за ним нашлось бы: p для исходного t(15)=3.82 не
+    находится вовсе — безопасный отказ вместо тихо подмененного
+    значения.
+    """
+    from corpus_real import CORPUS_REAL
+
+    rec = next(r for r in CORPUS_REAL if r["id"] == "A01")
+    foreign = next(r for r in CORPUS_REAL if r["id"] == "A02")["text"]
+    assert "t(" in foreign, "у вклинившегося фрагмента обязан быть свой t-тест"
+
+    spliced = rec["text"].replace(
+        "t(15) = 3.82, p = .002)",
+        f"t(15) = 3.82 {foreign[:70]} , p = .002)",
+    )
+    assert spliced != rec["text"]
+
+    doc = extract(spliced)
+    original = next(c for c in doc.claims
+                     if c.slots.get("t") and c.slots["t"].value == 3.82
+                     and c.slots.get("df") and c.slots["df"].value == 15.0)
+    assert "p" not in original.slots, (
+        "p из чужого предложения приклеился к исходному t/df — "
+        "граница утверждения снова зависит от найденного кандидата")
+    assert not original.candidates.get("p")

@@ -27,42 +27,9 @@ sys.path.insert(0, str(_ROOT / "tests"))
 from collections import defaultdict
 
 from corpus_real import CORPUS_REAL
-from pdf_corrupt import CORRUPTIONS, column_splicing
-from statverify.extract import extract
-from statverify.guard import admit
+from pdf_corrupt import CORRUPTIONS, column_splicing, ground_truth, resolve_after_corruption
 
 RECORDS = [r for r in CORPUS_REAL if r.get("has_t_test")]
-
-
-def ground_truth(text: str):
-    """Claim, извлечённый из НЕИСПОРЧЕННОГО текста — источник истинных
-    литералов/спанов для прицельной порчи и истинных значений для сверки."""
-    doc = extract(text)
-    for c in doc.claims:
-        if {"t", "df", "p"} <= set(c.slots):
-            return c
-    return None
-
-
-def resolve(text: str):
-    """Извлечь т/df/p из (возможно испорченного) текста заново и прогнать
-    через охранник. Возвращает (claim_или_None, admitted, values_или_None).
-
-    values берётся ТОЛЬКО если t/df/p сидят как конкретные, однозначно
-    разрешённые слоты (не кандидаты) — если после порчи p ушёл в список
-    кандидатов (0 или >1 найдено в окне), это не 'извлекатель ошибся
-    молча', а честная неоднозначность, которую полагается разрешать L5b,
-    а не эта проверка; такие случаи считаются 'не найдено', а не
-    'пропущено неверное значение', ровно по той же логике, что и
-    guard.py (правило 6 CLAUDE.md: абстенция — не ошибка)."""
-    doc = extract(text)
-    for c in doc.claims:
-        if not ({"t", "df", "p"} <= set(c.slots)):
-            continue
-        ok, results = admit(c, text)
-        values = {n: c.slots[n].value for n in ("t", "df", "p")}
-        return c, ok, values
-    return None, False, None
 
 
 def run_one(rec, corruption_name, corrupt_fn):
@@ -71,8 +38,8 @@ def run_one(rec, corruption_name, corrupt_fn):
     corrupted = corrupt_fn(rec["text"], gt)
     if corrupted is None:
         return "n/a"  # порча неприменима к этому утверждению (нет 'fi'/'fl' и т.п.)
-    claim, admitted, values = resolve(corrupted)
-    if claim is None:
+    claim, admitted, values = resolve_after_corruption(corrupted, rec["t"], rec["df"])
+    if values is None:
         return "not_found"
     if not admitted:
         return "rejected"

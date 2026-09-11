@@ -17,6 +17,7 @@ from statverify.guard import check_claim, check_slot
 from statverify.model import Slot
 
 from corpus import CORPUS
+from corpus_real import CORPUS_REAL
 from corrupt import CORRUPTIONS, EXPECTED_CATCHER
 
 
@@ -125,3 +126,46 @@ def test_discriminates_paper_error_from_mis_extraction():
     # Литерал настоящий и в настоящих скобках после настоящего t,
     # поэтому C1 и C3 слепы — ловит граница утверждения.
     assert any(r.reason == "not_contained" for r in results if not r.ok)
+
+
+def test_c5_catches_linebreak_truncated_number():
+    """ДЫРА 1 (найдена мутационным фаззингом PDF-порчи, реальный случай
+    corpus_real.py id='A01', PLOS ONE 10.1371/journal.pone.0267297):
+    'relatedness measures ... t(15) = 3.82, p = .002)' — настоящее
+    p = .002. Разрыв строки внутри числа ('.002' -> '.00\\n2)') даёт
+    извлекателю синтаксически валидный, но УСЕЧЁННЫЙ литерал '.00'
+    (значение 0.0 вместо истинных 0.002). До C5 это проходило все
+    четыре критерия: span на месте, значение разбирается из литерала,
+    маркер роли 'p =' стоит вплотную, вложенность соблюдена — критерия
+    ПОЛНОТЫ литерала не было вовсе. C5 обязан поймать именно это,
+    отдельно и независимо от C0-C4.
+    """
+    rec = next(r for r in CORPUS_REAL if r["id"] == "A01")
+    assert rec["p"] == 0.002 and "p = .002)" in rec["text"]
+    corrupted_text = rec["text"].replace("p = .002)", "p = .00\n2)")
+    assert corrupted_text != rec["text"]
+
+    doc = extract(corrupted_text)
+    claim = next(c for c in doc.claims if "t" in c.slots and "df" in c.slots)
+    assert claim.slots["p"].value == 0.0        # усечённый литерал '.00'
+    res = check_slot(claim.slots["p"], corrupted_text, claim)
+    assert not res.ok, "усечённое переносом число прошло охранника необнаруженным"
+    assert res.reason == "truncated_literal"
+
+
+def test_c5_no_false_rejection_on_real_corpus():
+    """C5 — новый критерий, и у него есть названный остаточный риск
+    (guard.py, комментарий у _LINE_ARTIFACT): 'p = .016\\n3 participants'
+    даёт ложный отказ. Здесь — эмпирическая проверка того, что на всех
+    43 настоящих (has_t_test) утверждениях corpus_real.py этот риск не
+    реализуется: подтверждено, что после каждого span в чистом тексте
+    корпуса стоит '.', ',', ')' или пробел с буквой — ни разу цифра
+    через перенос — поэтому C5 не даёт ни одного НОВОГО отказа."""
+    for rec in CORPUS_REAL:
+        if not rec.get("has_t_test"):
+            continue
+        doc = extract(rec["text"])
+        claim = next(c for c in doc.claims
+                     if {"t", "df", "p"} <= set(c.slots))
+        for r in check_claim(claim, rec["text"]):
+            assert r.ok, f"{rec['id']} [{r.slot}] {r.reason}: {r.detail}"
