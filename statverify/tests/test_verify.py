@@ -162,6 +162,76 @@ def test_solve_is_sound_on_consistent_grid():
     assert checked > 300, f"подозрительно мало проверок: {checked}"
 
 
+def test_solve_clamps_to_domain():
+    """Инвариант области определения Relation.solve — тоже не про
+    локализацию, должен держаться всегда: для любого отношения и любой
+    его решаемой переменной результат solve() либо None, либо целиком
+    лежит внутри DOMAIN[переменная] (relations.py вызывает
+    iv.meet(dom) последней строкой solve() именно ради этого).
+
+    Мутация, которую это ловит: замена 'return iv.meet(dom)' на
+    'return iv' в конце Relation.solve — то есть отключение отсечения.
+    На "естественной" сетке (test_solve_is_sound_on_consistent_grid)
+    сырые значения решателей и так обычно лежат в пределах домена, и
+    такая мутация могла бы пройти незамеченной — отсечение никогда не
+    срабатывает, если нечего отсекать. Поэтому здесь не сетка
+    согласованных случаев, а АДВЕРСАРИАЛЬНО подобранные боксы входов,
+    для которых сырой (неотсечённый) результат заведомо выходит за
+    DOMAIN: подобраны так, чтобы при снятой .meet(dom) assert ниже
+    гарантированно провалился, а не совпал с границей случайно.
+    """
+    from statverify.interval import DOMAIN, Interval
+
+    cases = [
+        # R5: se = est/t. t близко к нулю, est на границе своего домена
+        # -> |se| порядка 1e10, на порядки выше DOMAIN['se'].hi = 1e9.
+        (R5, "se", {"t": Interval(0.0001, 0.0001), "est": Interval(-1e6, 1e6)}),
+        # R4:center: ci_lo = 2*est - ci_hi. Оба слагаемых на границах
+        # своих доменов с совпадающим знаком -> результат 3e6, за
+        # пределами DOMAIN['ci_lo'] = [-1e6, 1e6].
+        (R4_CENTER, "ci_lo", {"est": Interval(1e6, 1e6), "ci_hi": Interval(-1e6, -1e6)}),
+        # R4:width: se = (ci_hi-ci_lo)/(2*t_crit). ci_lo > ci_hi (так в
+        # реальности не бывает, но ничто в типе Interval это не
+        # запрещает для ДВУХ РАЗНЫХ переменных) -> ширина отрицательна,
+        # se выходит в минус, вне DOMAIN['se'] = [TINY, 1e9].
+        (R4_WIDTH, "se", {"ci_lo": Interval(5.0, 5.0), "ci_hi": Interval(-5.0, -5.0),
+                          "df": Interval(50.0, 50.0), "alpha": Interval(0.05, 0.05)}),
+        # R4:width: ci_hi = ci_lo + 2*t_crit*se. se на границе своего
+        # домена (1e9) -> ci_hi порядка 1e9, далеко за DOMAIN['ci_hi'].
+        (R4_WIDTH, "ci_hi", {"ci_lo": Interval(0.0, 0.0), "se": Interval(1e9, 1e9),
+                             "df": Interval(50.0, 50.0), "alpha": Interval(0.05, 0.05)}),
+    ]
+
+    for rel, target, known in cases:
+        dom = DOMAIN[target]
+        d = rel.solve(target, known)
+        assert d is None or (dom.lo <= d.lo and d.hi <= dom.hi), (
+            f"{rel.key}.solve({target}, {known}) = {d} выходит за "
+            f"DOMAIN[{target!r}] = {dom} — отсечение не сработало")
+
+    # И то же самое на широкой сетке "естественных" случаев — не потому,
+    # что она способна поймать эту мутацию (см. докстрайн выше), а
+    # потому что свойство обязано держаться и там, не только на
+    # намеренно адверсариальных входах.
+    from synth7 import build_grid, gold, make_claim as make_claim7
+
+    checked = 0
+    for df, est, se in build_grid():
+        claim = make_claim7(gold(df, est, se))
+        rep = reported_intervals(claim)
+        for rel in (R2A, R5, R4_CENTER, R4_WIDTH):
+            for target in rel.solvers:
+                dom = DOMAIN[target]
+                others = {k: v for k, v in rep.items()
+                          if k != target and k in rel.vars}
+                d = rel.solve(target, others)
+                checked += 1
+                assert d is None or (dom.lo <= d.lo and d.hi <= dom.hi), (
+                    f"{rel.key}.solve({target}) = {d} выходит за "
+                    f"DOMAIN[{target!r}] = {dom} при df={df} est={est} se={se}")
+    assert checked > 300, f"подозрительно мало проверок: {checked}"
+
+
 def test_df_exonerated_by_normal_limit():
     """Нормальный предел обязан снимать подозрение с df в большинстве
     случаев: при сообщённом p ниже 2(1-Ф(|t|)) никакое df не согласует
