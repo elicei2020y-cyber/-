@@ -156,6 +156,52 @@ def column_splicing(text: str, gt: Claim, kind: str, foreign_p: str = ".731") ->
     return text[:cut] + junk + text[cut:]
 
 
+def legit_linebreak(text: str, gt: Claim) -> Optional[str]:
+    """Легитимный перенос строки ВНУТРИ ОДНОГО предложения — обычное
+    дело в PDF (строки рвутся постоянно, это не признак чужой колонки).
+    Перенос вставлен на месте пробела перед маркером p — тот же узор,
+    что tests/corpus.py::line_break. Не порча в смысле опасности: это
+    ДОЛЖНО продолжать извлекаться верно, используется для измерения
+    ПОТЕРЬ (не находок), а не находок."""
+    p = gt.slots.get("p")
+    if p is None:
+        return None
+    lo = p.span[0]
+    before = text[:lo]
+    marker_m = re.search(r"[pP]\s*[<>=≤≥]{1,2}\s*$", before)
+    if marker_m is None:
+        return None
+    ws_m = re.search(r"\s+$", before[:marker_m.start()])
+    if ws_m is None:
+        return None
+    new_before = before[:ws_m.start()] + "\n" + before[ws_m.end():]
+    return new_before + text[lo:]
+
+
+def legit_linebreak_with_trailing_p(text: str, gt: Claim,
+                                     trailing_p: str = ".500",
+                                     pad_chars: int = 0) -> Optional[str]:
+    """То же самое, плюс СЛЕДУЮЩЕЕ, не связанное предложение со своим
+    p дальше по тексту — модель именно того риска, ради которого
+    подбирается WIDE_CANDIDATE_WINDOW измерением, а не назначением:
+    окно, достаточно широкое, чтобы поймать настоящую склейку колонок,
+    способно зацепить и честное продолжение той же статьи.
+
+    pad_chars — необязательная прокладка ПЕРЕД дополнительным
+    предложением: расстояние до следующего p в реальном тексте не
+    фиксировано, и без разброса по расстоянию вся кривая потерь была бы
+    единственной точкой обрыва (все 43 записи схлопываются в один и тот
+    же зазор) вместо кривой, показывающей поведение при разных
+    расстояниях."""
+    base = legit_linebreak(text, gt)
+    if base is None:
+        return None
+    padding = ("also " * (pad_chars // 5))[:pad_chars]
+    trailer = (f" Additional {padding}exploratory analyses examined "
+               f"secondary outcomes without correction, p = {trailing_p}.")
+    return base + trailer
+
+
 def ocr_l1_o0(text: str, gt: Claim) -> Optional[str]:
     """OCR-подмены: строчная 'l' распознана как цифра '1', заглавная
     'O' — как '0'. Классическая ошибка OCR-слоя, а не PDF-текстового
